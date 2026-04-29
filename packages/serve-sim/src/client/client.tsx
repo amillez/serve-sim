@@ -5,7 +5,6 @@ import {
   screenBorderRadius,
   DEVICE_FRAMES,
   SimulatorToolbar,
-  SimulatorPanels,
   getDeviceType,
   type DeviceType,
 } from "serve-sim-client/simulator";
@@ -909,16 +908,6 @@ function App() {
             <span style={{ fontSize: 13, fontWeight: 500 }}>Drop media or .ipa</span>
           </div>
         )}
-      </div>
-
-      <div style={{ width: "100%", maxWidth: frameMaxWidth }}>
-        <SimulatorPanels
-          exec={execOnHost}
-          deviceUdid={config.device}
-          defaultBundleId={currentApp?.bundleId ?? null}
-        >
-          <SimulatorPanels.PushNotification />
-        </SimulatorPanels>
       </div>
 
       {/* Upload toasts */}

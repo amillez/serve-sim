@@ -6,8 +6,6 @@ export { SimulatorFrame } from "./SimulatorFrame.js";
 export type { SimulatorFrameProps } from "./SimulatorFrame.js";
 export { SimulatorToolbar } from "./SimulatorToolbar.js";
 export type { SimulatorToolbarProps, ToolbarButtonProps, TitleProps } from "./SimulatorToolbar.js";
-export { SimulatorPanels, PushNotificationPanel } from "./SimulatorPanels.js";
-export type { SimulatorPanelsProps, PushNotificationPanelProps } from "./SimulatorPanels.js";
 export {
   DEVICE_FRAMES,
   SIMULATOR_SCREENS,
