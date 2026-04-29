@@ -69,6 +69,58 @@ serve-sim --kill                       # stop all helpers
 
 Multiple booted simulators are supported — pass several device names, or leave it empty to attach to all of them.
 
+## Connectors
+
+`serve-sim` can be used with dev servers, browser, and AI editors for more seamless integration.
+
+### Claude Code Desktop
+
+Create a `.claude/launch.json` and define a server:
+
+```json
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ios",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve-sim"],
+      "port": 3200,
+    }
+  ]
+}
+```
+
+### Expo
+
+Automatically start the serve-sim process with `npx expo start` and access the URL at `http://localhost:8081/.sim`.
+
+First, customize the `metro.config.js` file (`bunx expo customize`):
+
+```js
+// Learn more https://docs.expo.io/guides/customizing-metro
+const { getDefaultConfig } = require("expo/metro-config");
+const connect = require("connect");
+const { simMiddleware } = require("serve-sim/middleware");
+
+/** @type {import('expo/metro-config').MetroConfig} */
+const config = getDefaultConfig(__dirname);
+
+config.server = config.server || {};
+const originalEnhanceMiddleware = config.server.enhanceMiddleware;
+config.server.enhanceMiddleware = (metroMiddleware, server) => {
+  const middleware = originalEnhanceMiddleware
+    ? originalEnhanceMiddleware(metroMiddleware, server)
+    : metroMiddleware;
+  const app = connect();
+  app.use(simMiddleware({ basePath: "/.sim" }));
+  app.use(middleware);
+  return app;
+};
+
+module.exports = config;
+```
+
 ## Embed in your dev server
 
 `serve-sim/middleware` is a Connect-style middleware that mounts the same preview UI inside your existing dev server (Metro, Vite, Next, plain Express, etc.). Run `serve-sim --detach` once to start the streaming helper, then add the middleware:
