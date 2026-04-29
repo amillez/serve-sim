@@ -872,8 +872,6 @@ function App() {
           <SimulatorToolbar.HomeButton
             onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
           />
-          <SimulatorToolbar.ScreenshotButton />
-          <SimulatorToolbar.RotateButton />
         </SimulatorToolbar.Actions>
       </SimulatorToolbar>
       <div

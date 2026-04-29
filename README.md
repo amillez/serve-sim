@@ -1,23 +1,33 @@
 # serve-sim
 
-Self-hosted iOS Simulator streaming. Run a single command and view a booted simulator in your browser — locally, over your LAN, or embedded into your own dev server.
+The `npx serve` of Apple Simulators. 
+
+Host your simulator for use with Agent tools like Codex, Cursor, or Claude Desktop — locally, over your LAN, or host on a remote mac and tunnel anywhere. 
 
 ```sh
-bunx serve-sim
+npx serve-sim
 # → Preview at http://localhost:3200
 ```
 
-`serve-sim` spawns a small Swift helper that captures the simulator's framebuffer via `simctl io`, exposes it as an MJPEG stream + WebSocket control channel, and serves a Preact preview UI on top. It works with any booted iOS Simulator — no Xcode plugin, no instrumentation in your app.
+`serve-sim` spawns a small Swift helper that captures the simulator's framebuffer via `simctl io`, exposes it as an MJPEG stream + WebSocket control channel, and serves a React preview UI on top. It works with any booted iOS Simulator — no Xcode plugin, no instrumentation in your app.
 
----
+## Features 
+
+- Full 60 FPS video stream in the browser.
+- Swipe from the bottom to go home.
+- gestures like pinch to zoom by holding the option key.
+- Simulator logs are forwarded to the browser for browser-use MCP tools to read from.
+- Drag and drop videos and images to add them to the simulator device. 
+- Keyboard commands and hot keys are forwarded to the simulator, including CMD+SHIFT+H to go home.
+- Apple Watch, iPad, and iOS support.
+
+## Why?
+
+Hosted simulators can be hard to test, `serve-sim` enables you to test the hosted infra locally first for faster iteration. When you're ready to host a simulator remotely, simply tunnel the served URL and users can interact with the simulator as if it were running locally on their device.
+
+I develop the Expo framework, but this tool is completely agnostic to React Native and can be used for any iOS interaction you need.
 
 ## Install
-
-```sh
-bun add -d serve-sim
-# or
-npm i -D serve-sim
-```
 
 Requires macOS with Xcode command line tools (`xcrun simctl`).
 

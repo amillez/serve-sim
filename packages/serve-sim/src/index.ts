@@ -179,6 +179,34 @@ function findBootedDevice(): string | null {
   return null;
 }
 
+/**
+ * Pick a sensible default device to boot when the user runs `serve-sim` with
+ * no booted simulator. Prefers an available iPhone on the newest iOS runtime.
+ */
+function pickDefaultDevice(): { udid: string; name: string } | null {
+  try {
+    const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
+    const data = JSON.parse(output) as {
+      devices: Record<string, Array<{ udid: string; name: string; state: string; isAvailable?: boolean }>>;
+    };
+    const iosRuntimes = Object.keys(data.devices)
+      .filter((k) => /SimRuntime\.iOS-/i.test(k))
+      .sort((a, b) => {
+        const va = (a.match(/iOS-(\d+)-(\d+)/) ?? []).slice(1).map(Number);
+        const vb = (b.match(/iOS-(\d+)-(\d+)/) ?? []).slice(1).map(Number);
+        return (vb[0] ?? 0) - (va[0] ?? 0) || (vb[1] ?? 0) - (va[1] ?? 0);
+      });
+    for (const runtime of iosRuntimes) {
+      const devices = data.devices[runtime] ?? [];
+      const iphone = devices.find(
+        (d) => d.isAvailable !== false && /^iPhone\b/i.test(d.name),
+      );
+      if (iphone) return { udid: iphone.udid, name: iphone.name };
+    }
+  } catch {}
+  return null;
+}
+
 function getDeviceName(udid: string): string | null {
   try {
     const output = execSync("xcrun simctl list devices -j", { encoding: "utf-8" });
@@ -531,11 +559,16 @@ async function follow(devices: string[], startPort: number, quiet: boolean) {
     ? devices.map(resolveDevice)
     : (() => {
         const booted = findBootedDevice();
-        if (!booted) {
-          console.error("No device specified and no booted simulator found.");
+        if (booted) return [booted];
+        const fallback = pickDefaultDevice();
+        if (!fallback) {
+          console.error("No device specified and no available iOS simulator found.");
           process.exit(1);
         }
-        return [booted];
+        if (!quiet) {
+          console.log(`No booted simulator — booting ${fallback.name}...`);
+        }
+        return [fallback.udid];
       })();
 
   const children = new Map<string, ChildProcess>();
@@ -652,11 +685,13 @@ async function detach(devices: string[], startPort: number): Promise<ServerState
     ? devices.map(resolveDevice)
     : (() => {
         const booted = findBootedDevice();
-        if (!booted) {
-          console.error("No device specified and no booted simulator found.");
+        if (booted) return [booted];
+        const fallback = pickDefaultDevice();
+        if (!fallback) {
+          console.error("No device specified and no available iOS simulator found.");
           process.exit(1);
         }
-        return [booted];
+        return [fallback.udid];
       })();
 
   const states: ServerState[] = [];
