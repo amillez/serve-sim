@@ -1,5 +1,7 @@
 # serve-sim
 
+https://github.com/user-attachments/assets/fbf890f4-c8c7-4684-82be-d677b8a188f8
+
 The `npx serve` of Apple Simulators. 
 
 Host your simulator for use with Agent tools like Codex, Cursor, or Claude Desktop — locally, over your LAN, or host on a remote mac and tunnel anywhere. 
