@@ -739,6 +739,35 @@ function App() {
     sendKey("up", META);
   }, [sendKey]);
 
+  // Tracks whether the simulator currently has input focus. Mousedowns inside
+  // the simulator container focus it; mousedowns elsewhere on the page blur
+  // it, so the user can interact with toolbar dropdowns, devtools, etc.
+  // without their typing leaking into the simulator.
+  const simContainerRef = useRef<HTMLDivElement | null>(null);
+  const [simFocused, setSimFocused] = useState(true);
+  const simFocusedRef = useRef(true);
+  simFocusedRef.current = simFocused;
+  const pressedKeysRef = useRef<Set<number>>(new Set());
+
+  useEffect(() => {
+    const onPointerDown = (e: PointerEvent) => {
+      const inside = !!simContainerRef.current?.contains(e.target as Node);
+      setSimFocused(inside);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, []);
+
+  // When focus leaves the simulator, release any keys still held down so iOS
+  // doesn't see stuck modifiers/keys.
+  useEffect(() => {
+    if (simFocused) return;
+    const held = pressedKeysRef.current;
+    if (held.size === 0) return;
+    for (const usage of held) sendWs(0x06, { type: "up", usage });
+    held.clear();
+  }, [simFocused, sendWs]);
+
   // Forward all keyboard events from the browser window to the simulator as
   // USB HID Keyboard usage codes (Usage Page 0x07). Modifiers and regular
   // keys are sent as independent key events, matching what a physical keyboard
@@ -747,6 +776,7 @@ function App() {
     // Shortcuts we intercept locally instead of forwarding the raw keys —
     // matches Simulator.app so muscle memory carries over.
     const onKey = (e: KeyboardEvent, type: "down" | "up") => {
+      if (!simFocusedRef.current) return;
       // Cmd+Shift+H → Home button (Simulator.app's shortcut).
       if (e.code === "KeyH" && e.metaKey && e.shiftKey) {
         e.preventDefault();
@@ -770,6 +800,8 @@ function App() {
       // Prevent browser-level shortcuts (Cmd+W, Tab focus, etc.) from
       // interfering while the simulator has input focus.
       e.preventDefault();
+      if (type === "down") pressedKeysRef.current.add(usage);
+      else pressedKeysRef.current.delete(usage);
       sendWs(0x06, { type, usage });
     };
     const down = (e: KeyboardEvent) => onKey(e, "down");
@@ -874,6 +906,7 @@ function App() {
         </SimulatorToolbar.Actions>
       </SimulatorToolbar>
       <div
+        ref={simContainerRef}
         style={{
           maxWidth: frameMaxWidth,
           width: "100%",
