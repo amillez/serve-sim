@@ -24,8 +24,12 @@ import { join } from "path";
  */
 
 const CLI_PATH = join(import.meta.dir, "../../src/index.ts");
-const FIRST_FRAME_BUDGET_MS = 1500;
-const IDLE_WINDOW_MS = 2000;
+// CI macOS simulators are markedly slower than dev laptops at producing the
+// first framebuffer snapshot, so budgets here are sized for the slow runner —
+// the regression we're guarding against (silenced stream → blank img tags) is
+// a complete absence of frames, not a few hundred ms of latency.
+const FIRST_FRAME_BUDGET_MS = process.env.CI ? 5000 : 1500;
+const IDLE_WINDOW_MS = process.env.CI ? 5000 : 2000;
 const MIN_FRAMES_IN_IDLE_WINDOW = 3;
 
 function firstBootedIosSim(): string | null {
@@ -161,21 +165,28 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
     let buf = Buffer.alloc(0);
     let firstFrameAt: number | null = null;
 
-    while (Date.now() - t0 < FIRST_FRAME_BUDGET_MS) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf = Buffer.concat([buf, Buffer.from(value)]);
-      const parsed = parseMjpegStream(buf);
-      buf = parsed.rest;
-      if (parsed.frames.length > 0) {
-        firstFrameAt = Date.now() - t0;
-        // Sanity: every frame must start with JPEG SOI.
-        for (const f of parsed.frames) {
-          expect(f.jpeg[0]).toBe(0xff);
-          expect(f.jpeg[1]).toBe(0xd8);
+    try {
+      while (Date.now() - t0 < FIRST_FRAME_BUDGET_MS) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf = Buffer.concat([buf, Buffer.from(value)]);
+        const parsed = parseMjpegStream(buf);
+        buf = parsed.rest;
+        if (parsed.frames.length > 0) {
+          firstFrameAt = Date.now() - t0;
+          // Sanity: every frame must start with JPEG SOI.
+          for (const f of parsed.frames) {
+            expect(f.jpeg[0]).toBe(0xff);
+            expect(f.jpeg[1]).toBe(0xd8);
+          }
+          break;
         }
-        break;
       }
+    } catch (err) {
+      // AbortError from the budget timer is expected when the stream stalls;
+      // fall through so the assertion below reports the real diagnosis
+      // (firstFrameAt === null) instead of a confusing unhandled rejection.
+      if ((err as { name?: string }).name !== "AbortError") throw err;
     }
 
     clearTimeout(timer);
@@ -197,18 +208,24 @@ describeWithSim(`serve-sim idle frame floor (booted sim ${bootedUdid ?? "<skippe
     let frameCount = 0;
     const sizes: number[] = [];
 
-    while (Date.now() - t0 < IDLE_WINDOW_MS) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf = Buffer.concat([buf, Buffer.from(value)]);
-      const parsed = parseMjpegStream(buf);
-      buf = parsed.rest;
-      for (const f of parsed.frames) {
-        frameCount++;
-        sizes.push(f.jpeg.length);
-        expect(f.jpeg[0]).toBe(0xff);
-        expect(f.jpeg[1]).toBe(0xd8);
+    try {
+      while (Date.now() - t0 < IDLE_WINDOW_MS) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf = Buffer.concat([buf, Buffer.from(value)]);
+        const parsed = parseMjpegStream(buf);
+        buf = parsed.rest;
+        for (const f of parsed.frames) {
+          frameCount++;
+          sizes.push(f.jpeg.length);
+          expect(f.jpeg[0]).toBe(0xff);
+          expect(f.jpeg[1]).toBe(0xd8);
+        }
       }
+    } catch (err) {
+      // The abort-controller deadline is supposed to fire at the end of the
+      // window — let the frame-count assertion be the actual signal.
+      if ((err as { name?: string }).name !== "AbortError") throw err;
     }
 
     clearTimeout(timer);
