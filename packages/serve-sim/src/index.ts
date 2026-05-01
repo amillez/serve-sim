@@ -167,6 +167,27 @@ function findHelperBinary(): string {
   return extracted;
 }
 
+/**
+ * Env to spawn the Swift helper with. The helper links SimulatorKit/CoreSimulator
+ * via `@rpath`, but the rpath baked in at build time points at whatever Xcode
+ * lived on the build machine (e.g. `/Applications/Xcode_16.4.app/...`). On any
+ * machine with Xcode installed at a different path that lookup fails with
+ * `dyld: Library not loaded: @rpath/SimulatorKit.framework`. Inject the user's
+ * actual Xcode PrivateFrameworks dir so dyld can resolve it regardless.
+ */
+function helperSpawnEnv(): NodeJS.ProcessEnv {
+  let dev: string | null = null;
+  try {
+    dev = execSync("xcode-select -p", { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {}
+  if (!dev) return process.env;
+  const fw = `${dev}/Library/PrivateFrameworks`;
+  return {
+    ...process.env,
+    DYLD_FRAMEWORK_PATH: process.env.DYLD_FRAMEWORK_PATH ? `${fw}:${process.env.DYLD_FRAMEWORK_PATH}` : fw,
+  };
+}
+
 // ─── Device helpers ───
 
 function findBootedDevice(): string | null {
@@ -438,6 +459,7 @@ async function spawnHelperDetached(opts: SpawnHelperOptions): Promise<{
   const child = nodeSpawn(helperPath, [udid, "--port", String(port)], {
     detached: true,
     stdio: ["ignore", logFd, logFd],
+    env: helperSpawnEnv(),
   });
   child.unref();
   closeSync(logFd);
@@ -470,6 +492,7 @@ async function spawnHelperAttached(opts: SpawnHelperOptions): Promise<{
   const child = nodeSpawn(helperPath, [udid, "--port", String(port)], {
     detached: false,
     stdio: ["ignore", logFd, logFd],
+    env: helperSpawnEnv(),
   });
   closeSync(logFd);
 
