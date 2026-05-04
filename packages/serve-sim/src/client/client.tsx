@@ -1,5 +1,19 @@
 import { createRoot } from "react-dom/client";
-import { useEffect, useState, useCallback, useRef, type CSSProperties, type DragEvent, type ReactNode } from "react";
+import { AXE_INSTALL_URL, AXE_NOT_INSTALLED_ERROR } from "../ax-shared";
+import type { AxElement, AxRect, AxSnapshot } from "../ax-shared";
+import {
+  createContext,
+  memo,
+  useEffect,
+  useState,
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  type CSSProperties,
+  type DragEvent,
+  type ReactNode,
+} from "react";
 import {
   SimulatorView,
   fallbackScreenSize,
@@ -198,6 +212,7 @@ declare global {
       device: string;
       basePath: string;
       logsEndpoint?: string;
+      axEndpoint?: string;
       appStateEndpoint?: string;
     };
   }
@@ -206,6 +221,115 @@ declare global {
 function simEndpoint(path: string): string {
   const basePath = window.__SIM_PREVIEW__?.basePath ?? "/";
   return basePath === "/" ? `/${path}` : `${basePath}/${path}`;
+}
+
+function isAxeUnavailable(snapshot: AxSnapshot | null) {
+  return snapshot?.errors?.includes(AXE_NOT_INSTALLED_ERROR) ?? false;
+}
+
+function useAxSnapshot(endpoint?: string) {
+  const [snapshot, setSnapshot] = useState<AxSnapshot | null>(null);
+  const [status, setStatus] = useState("AX off");
+
+  useEffect(() => {
+    if (!endpoint) {
+      setSnapshot(null);
+      setStatus("AX off");
+      return;
+    }
+
+    setSnapshot(null);
+    setStatus("AX waiting");
+    const source = new EventSource(endpoint);
+    source.onmessage = (event) => {
+      try {
+        const next = JSON.parse(event.data) as AxSnapshot;
+        setSnapshot(next);
+        setStatus(
+          isAxeUnavailable(next)
+            ? "AX unavailable: install AXe"
+            : `${next.elements.length} AX elements`,
+        );
+      } catch {
+        setStatus("AX parse error");
+      }
+    };
+    source.addEventListener("error", () => {
+      setStatus("AX reconnecting");
+    });
+    return () => source.close();
+  }, [endpoint]);
+
+  return { snapshot, status };
+}
+
+interface AxSnapshotContextValue {
+  snapshot: AxSnapshot | null;
+  status: string;
+}
+
+interface AxSelectionContextValue {
+  highlightedKey: string | null;
+  selectedKey: string | null;
+  setHighlightedKey: (key: string | null) => void;
+  setSelectedKey: (key: string | null) => void;
+}
+
+const AxSnapshotContext = createContext<AxSnapshotContextValue>({
+  snapshot: null,
+  status: "AX off",
+});
+const AxSelectionContext = createContext<AxSelectionContextValue | null>(null);
+
+function useAxSnapshotContext() {
+  return useContext(AxSnapshotContext);
+}
+
+function useAxSelectionContext() {
+  const context = useContext(AxSelectionContext);
+  if (!context) throw new Error("AX selection context is unavailable");
+  return context;
+}
+
+function AxStateProvider({
+  endpoint,
+  children,
+}: {
+  endpoint?: string;
+  children: ReactNode;
+}) {
+  const { snapshot, status } = useAxSnapshot(endpoint);
+  const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!endpoint) {
+      setHighlightedKey(null);
+      setSelectedKey(null);
+    }
+  }, [endpoint]);
+
+  const snapshotValue = useMemo(
+    () => ({ snapshot, status }),
+    [snapshot, status],
+  );
+  const selectionValue = useMemo(
+    () => ({
+      highlightedKey,
+      selectedKey,
+      setHighlightedKey,
+      setSelectedKey,
+    }),
+    [highlightedKey, selectedKey],
+  );
+
+  return (
+    <AxSnapshotContext.Provider value={snapshotValue}>
+      <AxSelectionContext.Provider value={selectionValue}>
+        {children}
+      </AxSelectionContext.Provider>
+    </AxSnapshotContext.Provider>
+  );
 }
 
 // ─── Exec / devices ───
@@ -1179,16 +1303,339 @@ function PermBtn({
   );
 }
 
+interface AxTargetProps {
+  element: AxElement;
+  index: number;
+  screen: { width: number; height: number };
+  highlighted: boolean;
+  selected: boolean;
+  onHighlight: (key: string | null) => void;
+  onSelect: (key: string | null) => void;
+}
+
+function axElementsEqual(a: AxElement, b: AxElement) {
+  if (a === b) return true;
+  if (
+    a.id !== b.id ||
+    a.path !== b.path ||
+    a.label !== b.label ||
+    a.value !== b.value ||
+    a.role !== b.role ||
+    a.type !== b.type ||
+    a.enabled !== b.enabled
+  ) return false;
+  const fa = a.frame, fb = b.frame;
+  return (
+    fa === fb ||
+    (fa.x === fb.x && fa.y === fb.y && fa.width === fb.width && fa.height === fb.height)
+  );
+}
+
+const AxTarget = memo(function AxTarget({
+  element,
+  index,
+  screen,
+  highlighted,
+  selected,
+  onHighlight,
+  onSelect,
+}: AxTargetProps) {
+  const key = axElementKey(element);
+  const axNode = axNodeForElement(element, index);
+  const visibleFrame = clampAxFrameForScreen(element.frame, screen);
+  if (!visibleFrame) return null;
+
+  const summary = axElementSummary(axNode);
+  return (
+    <div
+      data-ax-key={key}
+      data-ax-id={axNode.id}
+      data-ax-path={axNode.path}
+      data-ax-label={axNode.label}
+      data-ax-value={axNode.value}
+      data-ax-role={axNode.role}
+      data-ax-type={axNode.type}
+      data-ax-enabled={String(axNode.enabled)}
+      data-ax-frame={axFrameString(axNode.frame)}
+      data-ax-selected={String(selected)}
+      title={summary}
+      onClick={() => onSelect(key)}
+      onMouseEnter={() => onHighlight(key)}
+      onMouseLeave={() => onHighlight(null)}
+      style={{
+        ...axStyles.target,
+        left: `${(visibleFrame.x / screen.width) * 100}%`,
+        top: `${(visibleFrame.y / screen.height) * 100}%`,
+        width: `${(visibleFrame.width / screen.width) * 100}%`,
+        height: `${(visibleFrame.height / screen.height) * 100}%`,
+        borderColor: selected ? "#60a5fa" : highlighted ? "#fbbf24" : "#34d399",
+        background: selected
+          ? "rgba(96,165,250,0.24)"
+          : highlighted
+          ? "rgba(245,158,11,0.28)"
+          : "rgba(16,185,129,0.12)",
+      }}
+    />
+  );
+}, (prev, next) =>
+  prev.index === next.index &&
+  prev.highlighted === next.highlighted &&
+  prev.selected === next.selected &&
+  prev.onHighlight === next.onHighlight &&
+  prev.onSelect === next.onSelect &&
+  prev.screen.width === next.screen.width &&
+  prev.screen.height === next.screen.height &&
+  axElementsEqual(prev.element, next.element));
+
+function AxDomOverlay() {
+  const { snapshot } = useAxSnapshotContext();
+  const {
+    highlightedKey,
+    selectedKey,
+    setHighlightedKey,
+    setSelectedKey,
+  } = useAxSelectionContext();
+
+  if (!snapshot?.screen.width || !snapshot?.screen.height) return null;
+
+  return (
+    <div
+      aria-hidden="true"
+      style={axStyles.targets}
+    >
+      {snapshot.elements.map((element, index) => {
+        const key = axElementKey(element);
+        return (
+          <AxTarget
+            key={key}
+            element={element}
+            index={index}
+            screen={snapshot.screen}
+            highlighted={key === highlightedKey}
+            selected={key === selectedKey}
+            onHighlight={setHighlightedKey}
+            onSelect={setSelectedKey}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+const AxTreeItem = memo(function AxTreeItem({
+  element,
+  index,
+  active,
+  onHighlight,
+}: {
+  element: AxElement;
+  index: number;
+  active: boolean;
+  onHighlight: (key: string | null) => void;
+}) {
+  const key = axElementKey(element);
+  const axNode = axNodeForElement(element, index);
+  const size = `${Math.round(element.frame.width)}x${Math.round(element.frame.height)}`;
+  const itemTitle = [
+    axNode.label,
+    axNode.role || axNode.type || "element",
+    size,
+  ].filter(Boolean).join(" · ");
+
+  return (
+    <div
+      role="listitem"
+      tabIndex={0}
+      data-ax-key={key}
+      title={itemTitle}
+      onMouseEnter={() => onHighlight(key)}
+      onMouseLeave={() => onHighlight(null)}
+      onFocus={() => onHighlight(key)}
+      onBlur={() => onHighlight(null)}
+      style={{
+        ...axStyles.listItem,
+        ...(active ? axStyles.listItemActive : {}),
+      }}
+    >
+      <span style={axStyles.itemText}>
+        <span style={axStyles.itemLabel}>{element.label || element.role || "Unlabeled"}</span>
+        <span style={axStyles.itemMeta}>{element.role || element.type || "element"}</span>
+      </span>
+      <code style={axStyles.itemSize}>{size}</code>
+    </div>
+  );
+}, (prev, next) =>
+  prev.index === next.index &&
+  prev.active === next.active &&
+  prev.onHighlight === next.onHighlight &&
+  axElementsEqual(prev.element, next.element));
+
+function AxTreeTool({
+  overlayEnabled,
+  onToggleOverlay,
+}: {
+  overlayEnabled: boolean;
+  onToggleOverlay: () => void;
+}) {
+  const { snapshot } = useAxSnapshotContext();
+  const { highlightedKey, setHighlightedKey } = useAxSelectionContext();
+  const elements = snapshot?.elements ?? [];
+  const axeUnavailable = isAxeUnavailable(snapshot);
+  const error = snapshot?.errors?.[0] ?? null;
+  return (
+    <div style={{ ...panelStyles.section, padding: "8px 12px" }}>
+      <div style={axStyles.panelHeader}>
+        <span style={{ ...panelStyles.sectionTitle, margin: 0 }}>AX Tree</span>
+        <button
+          type="button"
+          onClick={onToggleOverlay}
+          aria-pressed={overlayEnabled}
+          style={axStyles.overlayToggle}
+        >
+          {overlayEnabled ? "Overlay on" : "Enable overlay"}
+        </button>
+      </div>
+      {!overlayEnabled ? (
+        null
+      ) : axeUnavailable ? (
+        <div style={{ ...panelStyles.empty, padding: 12 }}>
+          AX unavailable:{" "}
+          <a
+            href={AXE_INSTALL_URL}
+            style={axStyles.emptyLink}
+          >
+            install AXe
+          </a>
+        </div>
+      ) : elements.length === 0 ? (
+        <div style={{ ...panelStyles.empty, padding: 12 }}>
+          {error ?? "Waiting for accessibility data…"}
+        </div>
+      ) : (
+        <div style={axStyles.list} role="list">
+          {elements.map((element, index) => {
+            const key = axElementKey(element);
+            return (
+              <AxTreeItem
+                key={key}
+                element={element}
+                index={index}
+                active={key === highlightedKey}
+                onHighlight={setHighlightedKey}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function axNodeForElement(element: AxElement, index: number) {
+  const label = element.label || element.role || `element ${index + 1}`;
+  const role = element.role || element.type;
+  return {
+    id: element.id,
+    path: element.path,
+    label,
+    value: element.value,
+    role,
+    type: element.type,
+    enabled: element.enabled,
+    frame: element.frame,
+  };
+}
+
+function clampAxFrameForScreen(
+  frame: AxRect,
+  screen: { width: number; height: number },
+): AxRect | null {
+  const x = Math.max(0, frame.x);
+  const y = Math.max(0, frame.y);
+  const right = Math.min(screen.width, frame.x + frame.width);
+  const bottom = Math.min(screen.height, frame.y + frame.height);
+  const width = Math.max(0, right - x);
+  const height = Math.max(0, bottom - y);
+  return width > 0 && height > 0 ? { x, y, width, height } : null;
+}
+
+function axElementKey(element: AxElement) {
+  // element.id is AXUniqueId when present, otherwise falls back to path.
+  // Prefer it over path so React keys and selection survive sibling reorders.
+  return element.id;
+}
+
+function axElementSummary(axNode: ReturnType<typeof axNodeForElement>) {
+  const parts = [
+    `AX label: ${axNode.label || "Unlabeled"}`,
+    axNode.role ? `role: ${axNode.role}` : "",
+    axNode.type ? `type: ${axNode.type}` : "",
+    axNode.value ? `value: ${axNode.value}` : "",
+    axNode.id ? `id: ${axNode.id}` : "",
+    `path: ${axNode.path}`,
+    `frame: ${axFrameString(axNode.frame)}`,
+  ];
+  return parts.filter(Boolean).join("; ");
+}
+
+function axFrameString(frame: AxRect) {
+  return `${frame.x},${frame.y} ${frame.width}x${frame.height}`;
+}
+
+function AxToolbarButton({
+  overlayEnabled,
+  streaming,
+  onToggleOverlay,
+}: {
+  overlayEnabled: boolean;
+  streaming: boolean;
+  onToggleOverlay: () => void;
+}) {
+  const { status } = useAxSnapshotContext();
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <SimulatorToolbar.Button
+      aria-label={overlayEnabled ? "Hide accessibility overlay" : "Show accessibility overlay"}
+      aria-pressed={overlayEnabled}
+      title={status}
+      onClick={onToggleOverlay}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={
+        overlayEnabled && streaming
+          ? {
+              ...axStyles.toolbarButtonActive,
+              ...(hovered ? axStyles.toolbarButtonActiveHover : {}),
+            }
+          : undefined
+      }
+    >
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 8V5a2 2 0 0 1 2-2h3" />
+        <path d="M16 3h3a2 2 0 0 1 2 2v3" />
+        <path d="M21 16v3a2 2 0 0 1-2 2h-3" />
+        <path d="M8 21H5a2 2 0 0 1-2-2v-3" />
+        <circle cx="12" cy="12" r="3.5" />
+      </svg>
+    </SimulatorToolbar.Button>
+  );
+}
+
 function ToolsPanel({
   open,
   onClose,
   udid,
   currentApp,
+  axOverlayEnabled,
+  onToggleAxOverlay,
 }: {
   open: boolean;
   onClose: () => void;
   udid: string;
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
+  axOverlayEnabled: boolean;
+  onToggleAxOverlay: () => void;
 }) {
   return (
     <aside
@@ -1210,10 +1657,16 @@ function ToolsPanel({
         </button>
       </header>
 
-      <div style={panelStyles.body}>
-        <AppDetectionTool udid={udid} currentApp={currentApp} />
-        <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
-      </div>
+      {open && (
+        <div style={panelStyles.body}>
+          <AxTreeTool
+            overlayEnabled={axOverlayEnabled}
+            onToggleOverlay={onToggleAxOverlay}
+          />
+          <AppDetectionTool udid={udid} currentApp={currentApp} />
+          <AppPermissionsTool udid={udid} bundleId={currentApp?.bundleId ?? null} />
+        </div>
+      )}
     </aside>
   );
 }
@@ -1242,6 +1695,7 @@ function App() {
   const [devicesError, setDevicesError] = useState<string | null>(null);
   const [stoppingUdids, setStoppingUdids] = useState<Set<string>>(new Set());
   const [switching, setSwitching] = useState(false);
+  const [axOverlayEnabled, setAxOverlayEnabled] = useState(false);
 
   const fetchDevices = useCallback(async () => {
     setDevicesLoading(true);
@@ -1628,6 +2082,7 @@ function App() {
       : 0;
 
   return (
+    <AxStateProvider endpoint={axOverlayEnabled ? config?.axEndpoint : undefined}>
     <div
       style={{
         ...s.page,
@@ -1662,9 +2117,6 @@ function App() {
             trigger={<SimulatorToolbar.Title />}
           />
           <SimulatorToolbar.Actions>
-            <SimulatorToolbar.HomeButton
-              onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
-            />
             {currentApp?.isReactNative && (
               <SimulatorToolbar.Button
                 aria-label="Reload React Native bundle"
@@ -1677,6 +2129,14 @@ function App() {
                 </svg>
               </SimulatorToolbar.Button>
             )}
+            <SimulatorToolbar.HomeButton
+              onClick={(e) => { e.preventDefault(); onStreamButton("home"); }}
+            />
+            <AxToolbarButton
+              overlayEnabled={axOverlayEnabled}
+              streaming={streaming}
+              onToggleOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
+            />
             <SimulatorToolbar.RotateButton title="Rotate device" />
           </SimulatorToolbar.Actions>
         </SimulatorToolbar>
@@ -1708,6 +2168,7 @@ function App() {
             streamConfig={activeStreamConfig}
             onScreenConfigChange={onScreenConfigChange}
           />
+          {axOverlayEnabled && <AxDomOverlay />}
           {mediaDrop.isDragOver && (
             <div style={{ ...s.dropOverlay, borderRadius: imgBorderRadius }}>
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -1761,6 +2222,8 @@ function App() {
         onClose={() => setPanelOpen(false)}
         udid={config.device}
         currentApp={currentApp}
+        axOverlayEnabled={axOverlayEnabled}
+        onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
       />
 
       {/* Status bar */}
@@ -1771,6 +2234,7 @@ function App() {
         </span>
       </div>
     </div>
+    </AxStateProvider>
   );
 }
 
@@ -2176,6 +2640,108 @@ const panelStyles: Record<string, CSSProperties> = {
     color: "#fff",
     cursor: "pointer",
     padding: 0,
+  },
+};
+
+const axStyles: Record<string, CSSProperties> = {
+  targets: {
+    position: "absolute",
+    inset: 0,
+    overflow: "hidden",
+    pointerEvents: "none",
+    zIndex: 10,
+  },
+  target: {
+    position: "absolute",
+    boxSizing: "border-box",
+    minWidth: 1,
+    minHeight: 1,
+    padding: 0,
+    border: "1px solid #34d399",
+    borderRadius: 3,
+    cursor: "pointer",
+    pointerEvents: "auto",
+  },
+  panelHeader: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  overlayToggle: {
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 5,
+    background: "transparent",
+    color: "rgba(255,255,255,0.7)",
+    cursor: "pointer",
+    fontSize: 10,
+    padding: "3px 7px",
+  },
+  emptyLink: {
+    color: "#a5b4fc",
+    textDecoration: "none",
+  },
+  toolbarButtonActive: {
+    background: "rgba(255,255,255,0.08)",
+    color: "rgba(255,255,255,0.95)",
+  },
+  toolbarButtonActiveHover: {
+    background: "rgba(255,255,255,0.12)",
+  },
+  list: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    marginTop: 8,
+    padding: "8px 0",
+    maxHeight: 260,
+    overflowY: "auto",
+    scrollbarWidth: "thin",
+  },
+  listItem: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    borderRadius: 6,
+    padding: "4px 2px",
+    minWidth: 0,
+  },
+  listItemActive: {
+    background: "rgba(255,255,255,0.06)",
+  },
+  itemText: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+    flex: 1,
+    minWidth: 0,
+  },
+  itemLabel: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    color: "#eee",
+    fontSize: 12,
+    fontWeight: 500,
+  },
+  itemMeta: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    color: "rgba(255,255,255,0.45)",
+    fontFamily: "ui-monospace, monospace",
+    fontSize: 10,
+  },
+  itemSize: {
+    flexShrink: 0,
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: 6,
+    color: "rgba(255,255,255,0.55)",
+    fontFamily: "ui-monospace, monospace",
+    fontSize: 10,
+    padding: "3px 6px",
   },
 };
 

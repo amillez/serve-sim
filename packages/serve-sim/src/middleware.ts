@@ -2,6 +2,7 @@ import { readdirSync, readFileSync, existsSync, unlinkSync } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
+import { createAxStreamerCache } from "./ax";
 
 // Injected at build time as a base64-encoded string via `define`
 declare const __PREVIEW_HTML_B64__: string;
@@ -15,6 +16,8 @@ export interface ServeSimState {
   streamUrl: string;
   wsUrl: string;
 }
+
+const axStreamerCache = createAxStreamerCache();
 
 // Known bundle IDs that are always React Native shells (used as a fallback
 // before the app-container path resolves, since simctl can lag after launch).
@@ -168,6 +171,7 @@ export interface SimMiddlewareOptions {
  *   GET  {basePath}         — the preview HTML page
  *   GET  {basePath}/api     — serve-sim state JSON
  *   GET  {basePath}/logs    — SSE stream of simctl logs
+ *   GET  {basePath}/ax      — SSE stream of normalized accessibility snapshots
  */
 export function simMiddleware(options?: SimMiddlewareOptions) {
   const base = (options?.basePath ?? "/.sim").replace(/\/+$/, "");
@@ -193,6 +197,7 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           basePath: base,
           logsEndpoint: endpoint(base, "/logs", state.device),
           appStateEndpoint: endpoint(base, "/appstate", state.device),
+          axEndpoint: endpoint(base, "/ax", state.device),
         });
         const configScript = `<script>window.__SIM_PREVIEW__=${config}</script>`;
         html = html.replace("<!--__SIM_PREVIEW_CONFIG__-->", configScript);
@@ -215,6 +220,28 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
         "Cache-Control": "no-store",
       });
       res.end(JSON.stringify(state || null));
+      return;
+    }
+
+    // SSE: normalized accessibility snapshot stream
+    if (url === base + "/ax") {
+      const states = readServeSimStates();
+      const state = selectServeSimState(states, selectedDevice);
+      if (!state) {
+        res.writeHead(404);
+        res.end("No serve-sim device");
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      res.write(":\n\n");
+      const ax = axStreamerCache.get(state.device);
+      const removeClient = ax.addClient(res);
+      req.on("close", removeClient);
       return;
     }
 
