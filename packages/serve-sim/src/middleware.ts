@@ -415,15 +415,11 @@ export function simMiddleware(options?: SimMiddlewareOptions) {
           const bridge = await ensureInspectWebKitBridge();
           const bridgeTargets = await bridge.listTargets();
           const wsHost = bridgeWsHost(req.headers?.host, bridge.port);
-          // The bridge enumerates targets across every booted simulator.
-          // Filter to the device this preview is pinned to so the picker
-          // doesn't surface webviews that belong to a different sim.
-          const scoped = bridgeTargets.filter((target) =>
-            // If we couldn't resolve a udid (e.g. degraded HTTP path), keep
-            // the target rather than dropping it silently.
-            !target.udid || target.udid === state.device,
-          );
-          const targets = scoped.map((target) => ({
+          // inspect-webkit@0.0.3 only exposes `sim:<webinspectord-pid>` for
+          // simulator targets, which can't be reconciled against a sim UDID.
+          // Surface every booted sim's targets (Safari Develop-menu behavior)
+          // until inspect-webkit grows a real UDID we can filter on.
+          const targets = bridgeTargets.map((target) => ({
             ...target,
             webSocketDebuggerUrl: `ws://${wsHost}/devtools/page/${encodeURIComponent(target.id)}`,
             devtoolsFrontendUrl: devtoolsFrontendUrl(devtoolsFrontendBase, wsHost, target.id),
