@@ -13,11 +13,13 @@ import {
   useRef,
   type CSSProperties,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import {
   SimulatorView,
+  displayStreamConfig,
   fallbackScreenSize,
   screenBorderRadius,
   SimulatorToolbar,
@@ -2400,6 +2402,10 @@ function App() {
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
   const frameMaxWidth = simulatorMaxWidth(deviceType, activeStreamConfig);
   const frameAspectRatio = simulatorAspectRatio(activeStreamConfig);
+  const frameDisplayConfig = displayStreamConfig(activeStreamConfig);
+  const frameAspectRatioValue = frameDisplayConfig
+    ? frameDisplayConfig.width / frameDisplayConfig.height
+    : 1;
 
   // Touch/button relay via direct WebSocket
   const wsRef = useRef<WebSocket | null>(null);
@@ -2510,8 +2516,14 @@ function App() {
   const [viewportWidth, setViewportWidth] = useState(
     () => (typeof window !== "undefined" ? window.innerWidth : 0),
   );
+  const [viewportHeight, setViewportHeight] = useState(
+    () => (typeof window !== "undefined" ? window.innerHeight : 0),
+  );
   useEffect(() => {
-    const onResize = () => setViewportWidth(window.innerWidth);
+    const onResize = () => {
+      setViewportWidth(window.innerWidth);
+      setViewportHeight(window.innerHeight);
+    };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
@@ -2687,6 +2699,14 @@ function App() {
     }
   }, [fetchDevices]);
 
+  const simulatorResize = useSimulatorResize({
+    defaultWidth: frameMaxWidth,
+    viewportWidth,
+    viewportHeight,
+    aspectRatio: frameAspectRatioValue,
+    onStart: () => setSimFocused(false),
+  });
+
   // Only shift the simulator when the panel would otherwise collide with it.
   // Plenty of room → no shift (device stays at viewport center).
   // Encroaching → shift just enough to maintain a gap.
@@ -2701,8 +2721,8 @@ function App() {
     // Use the actually-rendered device width (clamped to the max) — it can
     // be smaller than the max when the window is too short for full size.
     const deviceWidth = deviceRenderedWidth > 0
-      ? Math.min(deviceRenderedWidth, frameMaxWidth)
-      : frameMaxWidth;
+      ? Math.min(deviceRenderedWidth, simulatorResize.width)
+      : simulatorResize.width;
     const deviceRightAtCenter = viewportWidth / 2 + deviceWidth / 2;
     const overlap = deviceRightAtCenter - (panelLeftEdge - PANEL_GAP);
     if (overlap > 0) {
@@ -2718,13 +2738,16 @@ function App() {
       style={{
         ...s.page,
         paddingRight: 24 + shiftForPanel,
-        transition: "padding-right 0.25s ease",
+        transition: simulatorResize.isResizing ? "none" : SIMULATOR_RESIZE_PAGE_TRANSITION,
       }}
     >
       <div
         style={{
           ...s.simulatorStack,
-          maxWidth: frameMaxWidth,
+          width: simulatorResize.width,
+          transition: simulatorResize.isResizing
+            ? SIMULATOR_RESIZE_DRAG_TRANSITION
+            : SIMULATOR_RESIZE_LAYOUT_TRANSITION,
         }}
       >
         <SimulatorToolbar
@@ -2771,17 +2794,25 @@ function App() {
         <div
           ref={simContainerRef}
           style={{
-            maxWidth: frameMaxWidth,
+            width: simulatorResize.width,
             maxHeight: "100%",
-            width: "100%",
             aspectRatio: frameAspectRatio,
             position: "relative",
+            transition: simulatorResize.isResizing
+              ? SIMULATOR_RESIZE_DRAG_TRANSITION
+              : SIMULATOR_RESIZE_LAYOUT_TRANSITION,
+            willChange: simulatorResize.isResizing ? "width" : undefined,
           }}
           {...mediaDrop.dropZoneProps}
         >
           <SimulatorView
             url={config.url}
-            style={{ width: "100%", height: "100%", border: "none" }}
+            style={{
+              width: "100%",
+              height: "100%",
+              border: "none",
+              pointerEvents: simulatorResize.isResizing ? "none" : undefined,
+            }}
             imageStyle={{
               borderRadius: imgBorderRadius,
               cornerShape: "superellipse(1.3)",
@@ -2807,6 +2838,34 @@ function App() {
               <span style={{ fontSize: 13, fontWeight: 500 }}>Drop media or .ipa</span>
             </div>
           )}
+          <div
+            ref={simulatorResize.handleRef}
+            role="separator"
+            aria-label="Resize simulator"
+            aria-orientation="vertical"
+            aria-valuemin={Math.round(SIMULATOR_RESIZE_MIN_WIDTH)}
+            aria-valuemax={Math.round(simulatorResize.maxWidth)}
+            aria-valuenow={Math.round(simulatorResize.width)}
+            tabIndex={0}
+            title="Drag to resize"
+            onPointerDown={simulatorResize.onPointerDown}
+            onPointerMove={simulatorResize.onPointerMove}
+            onPointerUp={simulatorResize.onPointerEnd}
+            onPointerCancel={simulatorResize.onPointerEnd}
+            onLostPointerCapture={simulatorResize.onPointerEnd}
+            onKeyDown={simulatorResize.onKeyDown}
+            onPointerEnter={() => simulatorResize.setHandleHovered(true)}
+            onPointerLeave={() => simulatorResize.setHandleHovered(false)}
+            style={{
+              ...s.resizeHandle,
+              ...(simulatorResize.handleActive ? s.resizeHandleActive : {}),
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
+              <path d="M9 13L13 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+              <path d="M5 13L13 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+            </svg>
+          </div>
         </div>
       </div>
 
@@ -2933,9 +2992,8 @@ const s: Record<string, CSSProperties> = {
     flexDirection: "column",
     alignItems: "center",
     gap: 12,
-    width: "100%",
     minWidth: 0,
-    transition: "max-width 0.25s ease",
+    transition: SIMULATOR_RESIZE_LAYOUT_TRANSITION,
   },
   bar: {
     display: "flex", alignItems: "center", gap: 10,
@@ -2961,6 +3019,34 @@ const s: Record<string, CSSProperties> = {
     color: "#a5b4fc",
     pointerEvents: "none",
     zIndex: 20,
+  },
+  resizeHandle: {
+    position: "absolute",
+    right: -34,
+    bottom: 2,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    color: "rgba(255,255,255,0.72)",
+    background: "rgba(28,28,30,0.62)",
+    border: "1px solid rgba(255,255,255,0.14)",
+    boxShadow: "0 8px 24px rgba(0,0,0,0.32)",
+    backdropFilter: "blur(18px)",
+    WebkitBackdropFilter: "blur(18px)",
+    cursor: "nwse-resize",
+    touchAction: "none",
+    opacity: 0.72,
+    transition: "opacity 0.18s ease, background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease",
+    zIndex: 25,
+  },
+  resizeHandleActive: {
+    opacity: 1,
+    background: "rgba(44,44,46,0.82)",
+    border: "1px solid rgba(255,255,255,0.28)",
+    boxShadow: "0 10px 28px rgba(0,0,0,0.42), 0 0 0 4px rgba(255,255,255,0.08)",
   },
   toastStack: {
     position: "fixed",
@@ -3063,6 +3149,226 @@ const pickerGroupHeaderStyle: CSSProperties = {
 
 const PANEL_WIDTH = 320;
 const DEVTOOLS_PANEL_WIDTH = 760;
+const SIMULATOR_RESIZE_MIN_WIDTH = 280;
+const SIMULATOR_RESIZE_MAX_SCALE = 3;
+const SIMULATOR_RESIZE_VIEWPORT_HEIGHT_RESERVED_FOR_CHROME = 136;
+const SIMULATOR_RESIZE_DRAG_TRANSITION = "width 70ms linear";
+const SIMULATOR_RESIZE_LAYOUT_TRANSITION = "width 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
+const SIMULATOR_RESIZE_PAGE_TRANSITION = "padding-right 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
+
+function useSimulatorResize({
+  defaultWidth,
+  viewportWidth,
+  viewportHeight,
+  aspectRatio,
+  onStart,
+}: {
+  defaultWidth: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  aspectRatio: number;
+  onStart: () => void;
+}) {
+  const [frameWidth, setFrameWidth] = useState<number | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
+  const [handleHovered, setHandleHovered] = useState(false);
+  const resizeStartRef = useRef<{ pointerId: number; startX: number; startY: number; startWidth: number } | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const handleRef = useRef<HTMLDivElement | null>(null);
+  const maxWidth = getSimulatorFrameMaxWidth(defaultWidth, viewportWidth, viewportHeight, aspectRatio);
+  const width = clampSimulatorFrameWidth(
+    frameWidth ?? defaultWidth,
+    defaultWidth,
+    viewportWidth,
+    viewportHeight,
+    aspectRatio,
+  );
+
+  useEffect(() => {
+    if (frameWidth == null) return;
+    const next = clampSimulatorFrameWidth(
+      frameWidth,
+      defaultWidth,
+      viewportWidth,
+      viewportHeight,
+      aspectRatio,
+    );
+    if (next !== frameWidth) setFrameWidth(next);
+  }, [aspectRatio, defaultWidth, frameWidth, viewportHeight, viewportWidth]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    const previousWebkitUserSelect = document.body.style.webkitUserSelect;
+    document.body.style.cursor = "nwse-resize";
+    document.body.style.userSelect = "none";
+    document.body.style.webkitUserSelect = "none";
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.webkitUserSelect = previousWebkitUserSelect;
+    };
+  }, [isResizing]);
+
+  const scheduleFrameWidth = useCallback((nextWidth: number) => {
+    const clampedWidth = clampSimulatorFrameWidth(
+      nextWidth,
+      defaultWidth,
+      viewportWidth,
+      viewportHeight,
+      aspectRatio,
+    );
+    if (resizeFrameRef.current != null) cancelAnimationFrame(resizeFrameRef.current);
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      setFrameWidth(clampedWidth);
+    });
+  }, [aspectRatio, defaultWidth, viewportHeight, viewportWidth]);
+
+  const stopResize = useCallback(() => {
+    const pointerId = resizeStartRef.current?.pointerId;
+    resizeStartRef.current = null;
+    if (pointerId != null && pointerId >= 0) {
+      const handle = handleRef.current;
+      if (handle?.hasPointerCapture(pointerId)) {
+        handle.releasePointerCapture(pointerId);
+      }
+    }
+    if (resizeFrameRef.current != null) {
+      cancelAnimationFrame(resizeFrameRef.current);
+      resizeFrameRef.current = null;
+    }
+    setIsResizing(false);
+  }, []);
+
+  useEffect(() => {
+    return () => stopResize();
+  }, [stopResize]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const stop = () => stopResize();
+    const stopWhenHidden = () => {
+      if (document.visibilityState === "hidden") stopResize();
+    };
+
+    window.addEventListener("blur", stop);
+    window.addEventListener("pointerup", stop, true);
+    window.addEventListener("pointercancel", stop, true);
+    document.addEventListener("visibilitychange", stopWhenHidden);
+
+    return () => {
+      window.removeEventListener("blur", stop);
+      window.removeEventListener("pointerup", stop, true);
+      window.removeEventListener("pointercancel", stop, true);
+      document.removeEventListener("visibilitychange", stopWhenHidden);
+    };
+  }, [isResizing, stopResize]);
+
+  const onPointerEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = resizeStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    stopResize();
+  }, [stopResize]);
+
+  const onPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeStartRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: width,
+    };
+    onStart();
+    setIsResizing(true);
+  }, [onStart, width]);
+
+  const onPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const start = resizeStartRef.current;
+    if (!start || start.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    if (event.buttons !== 1) {
+      stopResize();
+      return;
+    }
+
+    const deltaX = event.clientX - start.startX;
+    const deltaY = (event.clientY - start.startY) * aspectRatio;
+    const nextWidth = start.startWidth + (Math.abs(deltaX) >= Math.abs(deltaY) ? deltaX : deltaY);
+    scheduleFrameWidth(nextWidth);
+  }, [aspectRatio, scheduleFrameWidth, stopResize]);
+
+  const onKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const direction = event.key === "ArrowRight" || event.key === "ArrowDown"
+      ? 1
+      : event.key === "ArrowLeft" || event.key === "ArrowUp"
+        ? -1
+        : 0;
+    if (direction === 0) return;
+    event.preventDefault();
+    const step = event.shiftKey ? 80 : 24;
+    setFrameWidth(clampSimulatorFrameWidth(
+      width + (direction * step),
+      defaultWidth,
+      viewportWidth,
+      viewportHeight,
+      aspectRatio,
+    ));
+  }, [aspectRatio, defaultWidth, viewportHeight, viewportWidth, width]);
+
+  return {
+    handleRef,
+    width,
+    maxWidth,
+    isResizing,
+    handleActive: handleHovered || isResizing,
+    setHandleHovered,
+    onPointerDown,
+    onPointerMove,
+    onPointerEnd,
+    onKeyDown,
+  };
+}
+
+function clampSimulatorFrameWidth(
+  value: number,
+  defaultWidth: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  aspectRatio: number,
+) {
+  const maxWidth = getSimulatorFrameMaxWidth(defaultWidth, viewportWidth, viewportHeight, aspectRatio);
+  const minWidth = Math.min(SIMULATOR_RESIZE_MIN_WIDTH, maxWidth);
+  return Math.min(maxWidth, Math.max(minWidth, value));
+}
+
+function getSimulatorFrameMaxWidth(
+  defaultWidth: number,
+  viewportWidth: number,
+  viewportHeight: number,
+  aspectRatio: number,
+) {
+  const scaledMaxWidth = defaultWidth * SIMULATOR_RESIZE_MAX_SCALE;
+  const viewportMaxWidth =
+    viewportWidth > 0
+      ? Math.max(SIMULATOR_RESIZE_MIN_WIDTH, viewportWidth - 48)
+      : scaledMaxWidth;
+  const viewportMaxHeight =
+    viewportHeight > 0 && Number.isFinite(aspectRatio) && aspectRatio > 0
+      ? Math.max(
+          SIMULATOR_RESIZE_MIN_WIDTH,
+          (viewportHeight - SIMULATOR_RESIZE_VIEWPORT_HEIGHT_RESERVED_FOR_CHROME) * aspectRatio,
+        )
+      : scaledMaxWidth;
+  return Math.min(scaledMaxWidth, viewportMaxWidth, viewportMaxHeight);
+}
 
 const devtoolsStyles: Record<string, CSSProperties> = {
   panel: {
