@@ -31,6 +31,7 @@ import {
   type StreamConfig,
 } from "serve-sim-client/simulator";
 import { LocationEmulationTool } from "./LocationEmulationTool";
+import { Panel, PanelCloseButton, PanelHeader, PanelTitle } from "./Panel";
 
 /**
  * Fetches an MJPEG stream and parses out individual JPEG frames as blob URLs.
@@ -220,6 +221,11 @@ declare global {
       axEndpoint?: string;
       appStateEndpoint?: string;
       devtoolsEndpoint?: string;
+      gridApiEndpoint?: string;
+      gridStartEndpoint?: string;
+      gridShutdownEndpoint?: string;
+      gridMemoryEndpoint?: string;
+      previewEndpoint?: string;
     };
   }
 }
@@ -1962,6 +1968,106 @@ function AxToolbarButton({
   );
 }
 
+interface GridDevice {
+  device: string;
+  name: string;
+  runtime: string;
+  state: string;
+  helper: { port: number; url: string; streamUrl: string; wsUrl: string } | null;
+}
+
+interface MemoryReport {
+  totalBytes: number;
+  availableBytes: number;
+  runningSimulators: number;
+  perSimAvgBytes: number;
+  perSimSource: "measured" | "estimated";
+  estimatedAdditional: number;
+}
+
+function formatGridBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const gb = n / (1024 * 1024 * 1024);
+  if (gb >= 1) return `${gb.toFixed(gb >= 10 ? 0 : 1)} GB`;
+  const mb = n / (1024 * 1024);
+  return `${mb.toFixed(0)} MB`;
+}
+
+function useGridDevices(
+  endpoint: string | undefined,
+  enabled: boolean,
+  fast: boolean,
+) {
+  const [devices, setDevices] = useState<GridDevice[] | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+    if (!enabled || !endpoint) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(endpoint, { cache: "no-store" });
+        const json = await res.json();
+        if (!cancelled) setDevices(json.devices ?? []);
+      } catch {
+        if (!cancelled) setDevices([]);
+      }
+    };
+    tick();
+    const id = setInterval(tick, fast ? 750 : 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [endpoint, enabled, refreshKey, fast]);
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+  return { devices, refresh };
+}
+
+function useGridMemory(endpoint: string | undefined, enabled: boolean) {
+  const [report, setReport] = useState<MemoryReport | null>(null);
+  useEffect(() => {
+    if (!enabled || !endpoint) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(endpoint, { cache: "no-store" });
+        const json = (await res.json()) as MemoryReport;
+        if (!cancelled) setReport(json);
+      } catch {}
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [endpoint, enabled]);
+  return report;
+}
+
+function GridCapacityBanner({ report }: { report: MemoryReport | null }) {
+  if (!report || report.totalBytes === 0) return null;
+  const { estimatedAdditional, availableBytes, totalBytes, runningSimulators } = report;
+  const usedFraction = Math.max(0, Math.min(1, 1 - availableBytes / totalBytes));
+  const capacity = runningSimulators + estimatedAdditional;
+  const dotColor =
+    estimatedAdditional === 0 ? "#e66" : estimatedAdditional <= 1 ? "#e9a13b" : "#3b3";
+  return (
+    <div style={gridStyles.capacity}>
+      <span style={{ ...gridStyles.capacityDot, background: dotColor }} />
+      <span>{runningSimulators}/{capacity} sims</span>
+      <span style={{ color: "#666" }}>·</span>
+      <span style={{ color: "#888" }}>{formatGridBytes(availableBytes)} free</span>
+      <span aria-hidden style={gridStyles.capacityBar}>
+        <span
+          style={{
+            display: "block",
+            width: `${(usedFraction * 100).toFixed(1)}%`,
+            height: "100%",
+            background:
+              usedFraction > 0.9 ? "#e66" : usedFraction > 0.75 ? "#e9a13b" : "#3b3",
+            transition: "width 300ms ease, background 300ms ease",
+          }}
+        />
+      </span>
+    </div>
+  );
+}
+
 // Persists a width to localStorage and exposes a pointer-driven resize handler.
 // The panels live at the right edge, so dragging the handle leftwards grows
 // the panel — the delta is `startX - clientX`.
@@ -2105,6 +2211,290 @@ function ResizeHandle({
   );
 }
 
+function gridPreviewHref(previewEndpoint: string, udid: string): string {
+  const sep = previewEndpoint.includes("?") ? "&" : "?";
+  return `${previewEndpoint}${sep}device=${encodeURIComponent(udid)}`;
+}
+
+function GridTile({
+  device,
+  active,
+  previewEndpoint,
+  starting,
+  shuttingDown,
+  error,
+  onStart,
+  onShutdown,
+}: {
+  device: GridDevice;
+  active: boolean;
+  previewEndpoint: string;
+  starting: boolean;
+  shuttingDown: boolean;
+  error: string | null;
+  onStart: () => void;
+  onShutdown: () => void;
+}) {
+  const helper = device.helper;
+  const isBooted = device.state === "Booted";
+  const status = helper
+    ? "● live"
+    : starting
+    ? (isBooted ? "starting helper…" : "booting & starting…")
+    : shuttingDown
+    ? "shutting down…"
+    : isBooted ? "booted (no stream)" : device.state.toLowerCase();
+  const statusColor = helper ? "#3b3" : "#888";
+  const ringColor = active ? "rgba(10,132,255,0.55)" : "transparent";
+
+  const Wrapper: any = helper ? "a" : "div";
+  const wrapperProps = helper
+    ? { href: gridPreviewHref(previewEndpoint, device.device) }
+    : {};
+
+  return (
+    <Wrapper
+      {...wrapperProps}
+      className="grid-tile"
+      style={{
+        ...gridStyles.tile,
+        outline: `1px solid ${ringColor}`,
+      }}
+    >
+      {(helper || isBooted) && (
+        <button
+          type="button"
+          title={shuttingDown ? "Shutting down…" : "Shutdown simulator"}
+          aria-label="Shutdown simulator"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onShutdown();
+          }}
+          disabled={shuttingDown}
+          className="grid-shutdown-btn"
+          style={gridStyles.shutdownBtn}
+        >
+          ×
+        </button>
+      )}
+      {helper ? (
+        <div style={gridStyles.tilePreview}>
+          <img
+            src={helper.streamUrl}
+            alt={device.name}
+            draggable={false}
+            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+          />
+        </div>
+      ) : (
+        <div style={gridStyles.tilePlaceholder}>
+          {starting ? (
+            <span
+              aria-hidden
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: "50%",
+                border: "2px solid rgba(255,255,255,0.15)",
+                borderTopColor: "rgba(155,201,155,0.95)",
+                animation: "grid-spin 0.8s linear infinite",
+              }}
+            />
+          ) : (
+            <div style={{ fontSize: 28, opacity: 0.5 }}>{isBooted ? "▣" : "▢"}</div>
+          )}
+          {error ? <div style={gridStyles.tileError}>{error}</div> : null}
+          <button
+            type="button"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStart(); }}
+            disabled={starting}
+            style={{
+              ...gridStyles.tileStartBtn,
+              background: starting ? "#1a1a1a" : "#1d2a1d",
+              color: starting ? "#888" : "#9c9",
+              cursor: starting ? "default" : "pointer",
+            }}
+          >
+            {starting ? (isBooted ? "Starting…" : "Booting…") : (isBooted ? "Start stream" : "Boot & start")}
+          </button>
+        </div>
+      )}
+      <div style={gridStyles.tileFooter}>
+        <span style={gridStyles.tileName}>{device.name}</span>
+        <span style={{ color: statusColor, whiteSpace: "nowrap" }}>
+          {status}
+          {helper ? <span style={{ color: "#666" }}> :{helper.port}</span> : null}
+        </span>
+      </div>
+    </Wrapper>
+  );
+}
+
+function GridPanel({
+  open,
+  onClose,
+  currentUdid,
+  width,
+}: {
+  open: boolean;
+  onClose: () => void;
+  currentUdid: string;
+  width: number;
+}) {
+  const config = window.__SIM_PREVIEW__;
+  const apiEndpoint = config?.gridApiEndpoint;
+  const startEndpoint = config?.gridStartEndpoint;
+  const shutdownEndpoint = config?.gridShutdownEndpoint;
+  const memoryEndpoint = config?.gridMemoryEndpoint;
+  const previewEndpoint = config?.previewEndpoint ?? "/";
+
+  const [pending, setPending] = useState<Record<string, boolean>>({});
+  const [shuttingDown, setShuttingDown] = useState<Record<string, boolean>>({});
+  const [errors, setErrors] = useState<Record<string, string | null>>({});
+  const hasPending =
+    Object.values(pending).some(Boolean) || Object.values(shuttingDown).some(Boolean);
+  const { devices, refresh } = useGridDevices(apiEndpoint, open, hasPending);
+  const memory = useGridMemory(memoryEndpoint, open);
+
+  const waitForHelper = useCallback(
+    async (udid: string, timeoutMs = 20_000): Promise<GridDevice | null> => {
+      if (!apiEndpoint) return null;
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        try {
+          const res = await fetch(apiEndpoint, { cache: "no-store" });
+          const json = await res.json();
+          const found = (json.devices ?? []).find(
+            (d: GridDevice) => d.device === udid && d.helper,
+          );
+          if (found) return found;
+        } catch {}
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      return null;
+    },
+    [apiEndpoint],
+  );
+
+  const start = useCallback(
+    async (udid: string) => {
+      if (!startEndpoint) return;
+      setPending((p) => ({ ...p, [udid]: true }));
+      setErrors((e) => ({ ...e, [udid]: null }));
+      try {
+        const res = await fetch(startEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ udid }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || !json.ok) {
+          setErrors((e) => ({ ...e, [udid]: json.error ?? `HTTP ${res.status}` }));
+          return;
+        }
+        // The helper file may land a beat after `serve-sim --detach` exits.
+        // Wait for it to appear in the API so the click that follows lands
+        // on a fully-registered device, then jump to its preview — the
+        // user just hit "Boot & start", so navigation is the obvious next
+        // step and avoids a stale-state BootEmptyState reload.
+        const ready = await waitForHelper(udid);
+        if (ready) {
+          window.location.assign(gridPreviewHref(previewEndpoint, udid));
+          return;
+        }
+        setErrors((e) => ({ ...e, [udid]: "Helper did not register in time" }));
+      } catch (err: any) {
+        setErrors((e) => ({ ...e, [udid]: err?.message ?? "Request failed" }));
+      } finally {
+        setPending((p) => ({ ...p, [udid]: false }));
+        refresh();
+      }
+    },
+    [startEndpoint, refresh, waitForHelper, previewEndpoint],
+  );
+
+  // If the currently-focused simulator's helper disappears from the API
+  // (we shut it down here, the user shut it down elsewhere, or it crashed),
+  // hop to another live helper. Falling back to the bare preview URL lets
+  // middleware pick any remaining helper, or render the empty boot screen
+  // if the user just shut down their last simulator.
+  useEffect(() => {
+    if (!devices || !currentUdid) return;
+    const current = devices.find((d) => d.device === currentUdid);
+    if (current?.helper) return;
+    const next = devices.find((d) => d.helper && d.device !== currentUdid);
+    window.location.assign(
+      next ? gridPreviewHref(previewEndpoint, next.device) : previewEndpoint,
+    );
+  }, [devices, currentUdid, previewEndpoint]);
+
+  const shutdown = useCallback(
+    async (udid: string) => {
+      if (!shutdownEndpoint) return;
+      setShuttingDown((s) => ({ ...s, [udid]: true }));
+      setErrors((e) => ({ ...e, [udid]: null }));
+      try {
+        const res = await fetch(shutdownEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ udid }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok || !json.ok) {
+          setErrors((e) => ({ ...e, [udid]: json.error ?? `HTTP ${res.status}` }));
+        }
+      } catch (err: any) {
+        setErrors((e) => ({ ...e, [udid]: err?.message ?? "Request failed" }));
+      } finally {
+        setShuttingDown((s) => ({ ...s, [udid]: false }));
+        refresh();
+      }
+    },
+    [shutdownEndpoint, refresh],
+  );
+
+  return (
+    <Panel open={open} width={width}>
+      <style>{GRID_HOVER_CSS}</style>
+      <PanelHeader>
+        <PanelTitle>Simulators</PanelTitle>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <GridCapacityBanner report={memory} />
+          <PanelCloseButton onClick={onClose} />
+        </div>
+      </PanelHeader>
+      <div style={gridStyles.body}>
+        {devices === null ? null : devices.length === 0 ? (
+          <div style={gridStyles.empty}>No iOS simulators available.</div>
+        ) : (
+          devices.map((d) => (
+            <GridTile
+              key={d.device}
+              device={d}
+              active={d.device === currentUdid}
+              previewEndpoint={previewEndpoint}
+              starting={!!pending[d.device]}
+              shuttingDown={!!shuttingDown[d.device]}
+              error={errors[d.device] ?? null}
+              onStart={() => start(d.device)}
+              onShutdown={() => shutdown(d.device)}
+            />
+          ))
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+const GRID_HOVER_CSS = `
+  .grid-shutdown-btn { opacity: 0; transition: opacity 120ms, background 120ms, color 120ms; }
+  .grid-tile:hover .grid-shutdown-btn { opacity: 1; }
+  .grid-shutdown-btn:hover:not(:disabled) { background: #5a1d1d; color: #fff; border-color: #a33; }
+  .grid-tile:hover { border-color: #555 !important; }
+  @keyframes grid-spin { to { transform: rotate(360deg); } }
+`;
+
 function ToolsPanel({
   open,
   onClose,
@@ -2123,25 +2513,11 @@ function ToolsPanel({
   width: number;
 }) {
   return (
-    <aside
-      style={{
-        ...panelStyles.panel,
-        width,
-        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
-        opacity: open ? 1 : 0,
-        pointerEvents: open ? "auto" : "none",
-      }}
-      aria-hidden={!open}
-    >
-      <header style={panelStyles.header}>
-        <span style={panelStyles.headerTitle}>Tools</span>
-        <button onClick={onClose} style={panelStyles.closeBtn} aria-label="Close panel">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-      </header>
+    <Panel open={open} width={width}>
+      <PanelHeader>
+        <PanelTitle>Tools</PanelTitle>
+        <PanelCloseButton onClick={onClose} />
+      </PanelHeader>
 
       {open && (
         <div style={panelStyles.body}>
@@ -2154,7 +2530,7 @@ function ToolsPanel({
           <LocationEmulationTool udid={udid} exec={execOnHost} />
         </div>
       )}
-    </aside>
+    </Panel>
   );
 }
 
@@ -2186,17 +2562,8 @@ function WebKitDevtoolsPanel({
     : null;
 
   return (
-    <aside
-      style={{
-        ...devtoolsStyles.panel,
-        width,
-        transform: open ? "translateX(0)" : "translateX(calc(100% + 24px))",
-        opacity: open ? 1 : 0,
-        pointerEvents: open ? "auto" : "none",
-      }}
-      aria-hidden={!open}
-    >
-      <header style={devtoolsStyles.header}>
+    <Panel open={open} width={width}>
+      <PanelHeader>
         {targets.length > 0 ? (
           <WebKitTargetPicker
             udid={udid}
@@ -2210,13 +2577,13 @@ function WebKitDevtoolsPanel({
             {loading ? "Looking for Safari and inspectable webviews..." : "No inspectable Safari or WKWebView targets"}
           </span>
         )}
-        <button onClick={onClose} style={devtoolsStyles.iconButton} aria-label="Close WebKit DevTools" title="Close">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18" />
-            <line x1="6" y1="6" x2="18" y2="18" />
-          </svg>
-        </button>
-      </header>
+        <PanelCloseButton
+          onClick={onClose}
+          ariaLabel="Close WebKit DevTools"
+          title="Close"
+          iconSize={15}
+        />
+      </PanelHeader>
 
       <div style={devtoolsStyles.frameWrap}>
         {error ? (
@@ -2241,7 +2608,7 @@ function WebKitDevtoolsPanel({
           </div>
         )}
       </div>
-    </aside>
+    </Panel>
   );
 }
 
@@ -2274,6 +2641,7 @@ function App() {
   const [switching, setSwitching] = useState(false);
   const [axOverlayEnabled, setAxOverlayEnabled] = useState(false);
   const [devtoolsOpen, setDevtoolsOpen] = useState(false);
+  const [gridOpen, setGridOpen] = useState(false);
   const [selectedDevtoolsTargetId, setSelectedDevtoolsTargetId] = useState<string | null>(null);
 
   const fetchDevices = useCallback(async () => {
@@ -2515,6 +2883,12 @@ function App() {
     420,
     1400,
   );
+  const { width: gridPanelWidth, onPointerDown: onGridResize } = useResizableWidth(
+    "serve-sim:grid-panel-width",
+    GRID_PANEL_WIDTH,
+    360,
+    1400,
+  );
   const [viewportWidth, setViewportWidth] = useState(
     () => (typeof window !== "undefined" ? window.innerWidth : 0),
   );
@@ -2713,7 +3087,13 @@ function App() {
   // Plenty of room → no shift (device stays at viewport center).
   // Encroaching → shift just enough to maintain a gap.
   // Not enough room for both → fall back to no shift; the panel overlays.
-  const panelWidthPx = devtoolsOpen ? devtoolsPanelWidth : panelOpen ? toolsPanelWidth : 0;
+  const panelWidthPx = devtoolsOpen
+    ? devtoolsPanelWidth
+    : gridOpen
+    ? gridPanelWidth
+    : panelOpen
+    ? toolsPanelWidth
+    : 0;
   const PANEL_RIGHT_OFFSET = 12;
   const PANEL_GAP = 24;
   const maxShift = panelWidthPx > 0 ? panelWidthPx + PANEL_GAP : 0;
@@ -2896,13 +3276,14 @@ function App() {
       <div
         style={{
           ...sidebarRailStyles.rail,
-          opacity: panelOpen || devtoolsOpen ? 0 : 1,
-          pointerEvents: panelOpen || devtoolsOpen ? "none" : "auto",
+          opacity: panelOpen || devtoolsOpen || gridOpen ? 0 : 1,
+          pointerEvents: panelOpen || devtoolsOpen || gridOpen ? "none" : "auto",
         }}
       >
         <button
           onClick={() => {
             setDevtoolsOpen(false);
+            setGridOpen(false);
             setPanelOpen((o) => !o);
           }}
           style={sidebarRailStyles.button}
@@ -2918,6 +3299,7 @@ function App() {
         <button
           onClick={() => {
             setPanelOpen(false);
+            setGridOpen(false);
             setDevtoolsOpen((o) => !o);
           }}
           style={sidebarRailStyles.button}
@@ -2929,6 +3311,24 @@ function App() {
             <circle cx="12" cy="12" r="10" />
             <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
             <path d="M2 12h20" />
+          </svg>
+        </button>
+        <button
+          onClick={() => {
+            setPanelOpen(false);
+            setDevtoolsOpen(false);
+            setGridOpen((o) => !o);
+          }}
+          style={sidebarRailStyles.button}
+          aria-label="Open simulator grid"
+          aria-pressed={gridOpen}
+          title="Simulators"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1.5" />
+            <rect x="14" y="3" width="7" height="7" rx="1.5" />
+            <rect x="3" y="14" width="7" height="7" rx="1.5" />
+            <rect x="14" y="14" width="7" height="7" rx="1.5" />
           </svg>
         </button>
       </div>
@@ -2947,6 +3347,19 @@ function App() {
         visible={panelOpen}
         onPointerDown={onToolsResize}
         ariaLabel="Resize tools panel"
+      />
+
+      <GridPanel
+        open={gridOpen}
+        onClose={() => setGridOpen(false)}
+        currentUdid={config.device}
+        width={gridPanelWidth}
+      />
+      <ResizeHandle
+        panelWidth={gridPanelWidth}
+        visible={gridOpen}
+        onPointerDown={onGridResize}
+        ariaLabel="Resize simulators panel"
       />
 
       <WebKitDevtoolsPanel
@@ -3151,6 +3564,7 @@ const pickerGroupHeaderStyle: CSSProperties = {
 
 const PANEL_WIDTH = 320;
 const DEVTOOLS_PANEL_WIDTH = 760;
+const GRID_PANEL_WIDTH = 720;
 const SIMULATOR_RESIZE_MIN_WIDTH = 280;
 const SIMULATOR_RESIZE_MAX_SCALE = 3;
 const SIMULATOR_RESIZE_VIEWPORT_HEIGHT_RESERVED_FOR_CHROME = 136;
@@ -3373,35 +3787,6 @@ function getSimulatorFrameMaxWidth(
 }
 
 const devtoolsStyles: Record<string, CSSProperties> = {
-  panel: {
-    position: "fixed",
-    top: 12,
-    right: 12,
-    bottom: 12,
-    width: `min(${DEVTOOLS_PANEL_WIDTH}px, calc(100vw - 32px))`,
-    minWidth: 0,
-    background: "rgba(20,20,22,0.92)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 14,
-    color: "#eee",
-    display: "flex",
-    flexDirection: "column",
-    overflow: "hidden",
-    transition: "transform 0.25s ease, opacity 0.2s ease",
-    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    fontFamily: "-apple-system, system-ui, sans-serif",
-    zIndex: 35,
-  },
-  header: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    padding: "6px 10px 6px 12px",
-    flexShrink: 0,
-  },
   titleGroup: {
     display: "flex",
     alignItems: "baseline",
@@ -3607,6 +3992,135 @@ const devtoolsStyles: Record<string, CSSProperties> = {
   },
 };
 
+const gridStyles: Record<string, CSSProperties> = {
+  body: {
+    flex: 1,
+    minHeight: 0,
+    overflowY: "auto",
+    padding: 14,
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
+    gridAutoRows: "minmax(300px, auto)",
+    gap: 12,
+    alignContent: "start",
+  },
+  empty: {
+    gridColumn: "1 / -1",
+    background: "#1c1c1e",
+    border: "1px dashed rgba(255,255,255,0.1)",
+    borderRadius: 10,
+    padding: 16,
+    color: "rgba(255,255,255,0.5)",
+    fontSize: 12,
+    textAlign: "center",
+  },
+  capacity: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    padding: "3px 8px",
+    borderRadius: 999,
+    background: "#101010",
+    border: "1px solid #222",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    fontSize: 11,
+    color: "#bbb",
+    lineHeight: 1,
+  },
+  capacityDot: { width: 6, height: 6, borderRadius: 3, flex: "0 0 auto" },
+  capacityBar: {
+    marginLeft: 2,
+    width: 28,
+    height: 3,
+    background: "#1c1c1c",
+    borderRadius: 2,
+    overflow: "hidden",
+    display: "inline-block",
+  },
+  tile: {
+    position: "relative",
+    display: "flex",
+    flexDirection: "column",
+    background: "#111",
+    borderRadius: 10,
+    overflow: "hidden",
+    textDecoration: "none",
+    color: "inherit",
+    border: "1px solid #2a2a2a",
+    transition: "border-color 120ms",
+  },
+  tilePreview: {
+    flex: 1,
+    minHeight: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 8,
+    background: "#000",
+    pointerEvents: "none",
+  },
+  tilePlaceholder: {
+    flex: 1,
+    minHeight: 0,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 12,
+    flexDirection: "column",
+    gap: 10,
+    color: "#888",
+    fontSize: 12,
+    textAlign: "center",
+  },
+  tileError: {
+    color: "#e66",
+    fontSize: 11,
+    fontFamily: "ui-monospace, monospace",
+  },
+  tileStartBtn: {
+    padding: "6px 12px",
+    borderRadius: 6,
+    border: "1px solid #333",
+    fontSize: 11,
+    fontFamily: "ui-monospace, monospace",
+  },
+  tileFooter: {
+    padding: "6px 10px",
+    borderTop: "1px solid #222",
+    fontSize: 11,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    color: "#bbb",
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 8,
+  },
+  tileName: {
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  shutdownBtn: {
+    position: "absolute",
+    top: 6,
+    right: 6,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    border: "1px solid #444",
+    background: "rgba(20,20,20,0.85)",
+    color: "#ccc",
+    fontSize: 13,
+    lineHeight: 1,
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 0,
+    zIndex: 2,
+    pointerEvents: "auto",
+  },
+};
+
 const sidebarRailStyles: Record<string, CSSProperties> = {
   rail: {
     position: "fixed",
@@ -3656,44 +4170,6 @@ const panelStyles: Record<string, CSSProperties> = {
     cursor: "pointer",
     transition: "background 0.15s ease, color 0.15s ease",
     zIndex: 40,
-  },
-  panel: {
-    position: "fixed",
-    top: 12,
-    right: 12,
-    bottom: 12,
-    width: PANEL_WIDTH,
-    background: "rgba(20,20,22,0.92)",
-    border: "1px solid rgba(255,255,255,0.08)",
-    borderRadius: 14,
-    color: "#eee",
-    display: "flex",
-    flexDirection: "column",
-    overflow: "hidden",
-    transition: "transform 0.25s ease, opacity 0.2s ease",
-    boxShadow: "0 12px 40px rgba(0,0,0,0.55)",
-    backdropFilter: "blur(18px)",
-    WebkitBackdropFilter: "blur(18px)",
-    fontFamily: "-apple-system, system-ui, sans-serif",
-    zIndex: 35,
-  },
-  header: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    padding: "6px 10px 6px 12px",
-  },
-  headerTitle: { fontSize: 11, fontWeight: 500, color: "rgba(255,255,255,0.55)" },
-  closeBtn: {
-    background: "transparent",
-    border: "none",
-    color: "#aaa",
-    cursor: "pointer",
-    padding: 4,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 4,
   },
   body: { padding: 14, overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 12 },
   sectionTitle: {
