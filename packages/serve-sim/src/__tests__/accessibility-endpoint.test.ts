@@ -13,6 +13,10 @@ import { join } from "path";
 
 const CLI_PATH = join(import.meta.dir, "../../src/index.ts");
 const AX_RESPONSE_BUDGET_MS = process.env.CI ? 10_000 : 5_000;
+// The Swift helper returns 503 while the simulator's AX framework is still
+// warming up after boot. Poll past that startup window before failing.
+const AX_READY_BUDGET_MS = process.env.CI ? 30_000 : 10_000;
+const AX_READY_POLL_INTERVAL_MS = 500;
 
 function firstBootedIosSim(): string | null {
   try {
@@ -65,19 +69,32 @@ describeWithSim(`serve-sim accessibility endpoint (booted sim ${bootedUdid ?? "<
   });
 
   test("returns a bounded accessibility tree without crashing the helper", async () => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), AX_RESPONSE_BUDGET_MS);
+    const deadline = Date.now() + AX_READY_BUDGET_MS;
+    let lastStatus = 0;
 
-    try {
-      const res = await fetch(axUrl, { signal: controller.signal });
-      expect(res.status).toBe(200);
-      const tree = await res.json() as Array<{ frame?: unknown; type?: string }>;
-      expect(Array.isArray(tree)).toBe(true);
-      expect(tree.length).toBeGreaterThan(0);
-      expect(tree[0]?.frame).toBeTruthy();
-      expect(typeof tree[0]?.type).toBe("string");
-    } finally {
-      clearTimeout(timer);
+    while (Date.now() < deadline) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), AX_RESPONSE_BUDGET_MS);
+      try {
+        const res = await fetch(axUrl, { signal: controller.signal });
+        lastStatus = res.status;
+        if (res.status === 200) {
+          const tree = await res.json() as Array<{ frame?: unknown; type?: string }>;
+          expect(Array.isArray(tree)).toBe(true);
+          expect(tree.length).toBeGreaterThan(0);
+          expect(tree[0]?.frame).toBeTruthy();
+          expect(typeof tree[0]?.type).toBe("string");
+          return;
+        }
+        // 503 = helper alive but AX not yet ready (sim still warming up).
+        // Anything else is a hard failure.
+        if (res.status !== 503) break;
+      } finally {
+        clearTimeout(timer);
+      }
+      await new Promise((r) => setTimeout(r, AX_READY_POLL_INTERVAL_MS));
     }
-  }, AX_RESPONSE_BUDGET_MS + 5_000);
+
+    throw new Error(`AX endpoint never returned 200 within ${AX_READY_BUDGET_MS}ms (last status ${lastStatus})`);
+  }, AX_READY_BUDGET_MS + 5_000);
 });
