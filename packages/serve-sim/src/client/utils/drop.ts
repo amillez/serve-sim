@@ -48,6 +48,32 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
+// Stream a file to /tmp via the /exec base64 chunk loop. Used by the camera
+// panel to stage image/video sources for `serve-sim camera --file`.
+// Caller is responsible for the lifetime of the temp file.
+export async function uploadFileToTmp(
+  file: File,
+  prefix: string,
+  ext: string,
+  exec: (command: string) => Promise<ExecResult>,
+): Promise<string> {
+  if (file.size > DROP_MAX_FILE_SIZE) {
+    throw new Error("File too large (max 500MB)");
+  }
+  const tmpPath = `/tmp/${prefix}-${crypto.randomUUID()}.${ext}`;
+  const buffer = await file.arrayBuffer();
+  const b64 = arrayBufferToBase64(buffer);
+  for (let offset = 0; offset < b64.length; offset += DROP_CHUNK_SIZE) {
+    const chunk = b64.slice(offset, offset + DROP_CHUNK_SIZE);
+    const op = offset === 0 ? ">" : ">>";
+    const result = await exec(`bash -c 'echo ${chunk} | base64 -d ${op} ${tmpPath}'`);
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || `Write failed (exit ${result.exitCode})`);
+    }
+  }
+  return tmpPath;
+}
+
 export async function uploadDroppedFile(
   file: File,
   kind: DropKind,

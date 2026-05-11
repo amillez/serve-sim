@@ -16,6 +16,10 @@ declare global {
       gridShutdownEndpoint?: string;
       gridMemoryEndpoint?: string;
       previewEndpoint?: string;
+      // Absolute path of the running serve-sim entry script. The camera tool
+      // shells out via `node <bin> camera ...` so it doesn't depend on the
+      // `serve-sim` binary being on the user's PATH.
+      serveSimBin?: string;
     };
   }
 }
